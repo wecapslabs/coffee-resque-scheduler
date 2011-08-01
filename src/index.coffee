@@ -34,9 +34,10 @@ class ResqueScheduler extends EventEmitter
 
   delayedPush: (timestamp, item) ->
     rTimestamp = Helpers.rTimestamp timestamp
-
-    @redis.rpush @resque.key("delayed:#{rTimestamp}"), item
-    @redis.zadd @resque.key('delayed_queue_schedule'), rTimestamp, rTimestamp
+    multi = @redis.multi()
+    multi.rpush @resque.key("delayed:#{rTimestamp}"), item
+    multi.zadd  @resque.key('delayed_queue_schedule'), rTimestamp, rTimestamp
+    multi.exec()
     
   start: ->
     if not @running
