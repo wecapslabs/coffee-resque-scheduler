@@ -42,9 +42,7 @@ class ResqueScheduler extends EventEmitter
   start: ->
     if not @running
       @running = true
-      self = this
-      @interval = setInterval ((->
-        self.poll())), 5000     # Runs every five seconds
+      @interval = setInterval ( => @poll() ), 1000
   
   end: (cb) ->
     @running = false
