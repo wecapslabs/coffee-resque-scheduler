@@ -4,19 +4,19 @@ EventEmitter = require('events').EventEmitter
 Helpers =
   timestamp: (val) ->
     Math.floor @getTime val
-    
+
   getTime: (val) ->
     if @isDate val
       val.getTime() / 1000
     else if @isNumber val
       val / 1000
     else
-      throw "Invalid timestamp provide. Should be either a Date object or a number."    
-    
+      throw "Invalid timestamp provide. Should be either a Date object or a number."
+
   isDate:   (val) -> '[object Date]' is toString.apply val
   isNumber: (val) -> typeof val is 'number' and isFinite val
- 
-#        
+
+#
 #
 #
 class ResqueScheduler extends EventEmitter
@@ -24,9 +24,12 @@ class ResqueScheduler extends EventEmitter
     @resque  = resque
     @redis   = @resque.redis
     @running = false
-    
+
   enqueueAt: (queue, future, command, args) ->
-    job = JSON.stringify class: command, queue: queue, args: args || []
+    job = JSON.stringify
+      class: command
+      queue: queue
+      args: args || []
     @delayDelivery future, job
 
   enqueueIn: (queue, secondsFromNow, command, args) ->
@@ -39,18 +42,18 @@ class ResqueScheduler extends EventEmitter
     multi.rpush @resque.key("delayed:#{future}"), job
     multi.zadd  @resque.key('delayed_queue_schedule'), future, future
     multi.exec()
-    
+
   start: ->
     return if @running
     @running = true
     @poll()
-  
+
   end: ->
     @running = false
 
   #
   # poll for all timestamps between between now and in the past
-  #    
+  #
   poll: ->
     time = Helpers.timestamp @now()
     @nextDelayedTimestamp time, (timestamp) =>
@@ -58,7 +61,7 @@ class ResqueScheduler extends EventEmitter
         @deliverJobs timestamp, => @poll()
       else
         @pause()
-  
+
   #
   # ran out of delayed jobs to transfer
   #
@@ -67,7 +70,7 @@ class ResqueScheduler extends EventEmitter
       return unless @running
       @poll()
     , 1000
-    
+
   #
   # fetch the next timestamp in the delay queue
   #
@@ -75,7 +78,7 @@ class ResqueScheduler extends EventEmitter
     key = @resque.key('delayed_queue_schedule')
     @redis.zrangebyscore key, '-inf', time, 'limit', 0, 1, (err, items) ->
       callback items[0]
-        
+
   #
   # deliver the delayed jobs to their targeted queues
   #
@@ -83,7 +86,7 @@ class ResqueScheduler extends EventEmitter
     @jobsForDelivery timestamp, (jobs) =>
       @deliver job for job in jobs
       callback()
-        
+
   #
   # fetch all the jobs at the delayed timeslot
   #
@@ -101,7 +104,7 @@ class ResqueScheduler extends EventEmitter
   deliver: (job) ->
     log "Delivering job #{job.class}"
     @resque.enqueue job.queue, job.class, job.args
-  
+
   #
   # delete the timestamp from the delay queue
   #
@@ -111,14 +114,13 @@ class ResqueScheduler extends EventEmitter
     multi.del  key
     multi.zrem @resque.key('delayed_queue_schedule'), timestamp
     multi.exec -> callback()
-    
+
   #
   # current time in millis
   #
   now: -> new Date().getTime()
-        
+
 exports.schedulerUsing = (Resque) ->
   new exports.ResqueScheduler Resque || {}
 
 exports.ResqueScheduler = ResqueScheduler
-    
