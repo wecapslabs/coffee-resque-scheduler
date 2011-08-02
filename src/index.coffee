@@ -17,10 +17,7 @@ Helpers =
   isNumber: (val) -> typeof val is 'number' and isFinite val
  
 #        
-# Maintains the actual queue that will be processing the scheduled jobs.
-# Most of the logic is ported over from the Ruby Resque Scheduler,
-# so I tried to keep the names and rough functionality the same so
-# the can be compatible and such.
+#
 #
 class ResqueScheduler extends EventEmitter
   constructor: (resque) ->
@@ -28,18 +25,18 @@ class ResqueScheduler extends EventEmitter
     @redis   = @resque.redis
     @running = false
     
-  enqueueAt: (queue, timestamp, command, args) ->
-    item = JSON.stringify class: command, queue: queue, args: args || []
-    @delayedPush timestamp, item
+  enqueueAt: (queue, future, command, args) ->
+    job = JSON.stringify class: command, queue: queue, args: args || []
+    @delayDelivery future, job
 
-  enqueueIn: (queue, numberOfSecondsFromNow, command, args) ->
-    newTime = @now() + numberOfSecondsFromNow * 1000
-    @enqueueAt queue, newTime, command, args
+  enqueueIn: (queue, secondsFromNow, command, args) ->
+    future = @now() + secondsFromNow * 1000
+    @enqueueAt queue, future, command, args
 
-  delayedPush: (delay, item) ->
-    future = Helpers.timestamp delay
+  delayDelivery: (future, job) ->
+    future = Helpers.timestamp future
     multi  = @redis.multi()
-    multi.rpush @resque.key("delayed:#{future}"), item
+    multi.rpush @resque.key("delayed:#{future}"), job
     multi.zadd  @resque.key('delayed_queue_schedule'), future, future
     multi.exec()
     
@@ -58,7 +55,7 @@ class ResqueScheduler extends EventEmitter
     time = Helpers.timestamp @now()
     @nextDelayedTimestamp time, (timestamp) =>
       if timestamp
-        @enqueueDelayedItemsForTimestamp timestamp, => @poll()
+        @deliverJobs timestamp, => @poll()
       else
         @pause()
   
@@ -75,25 +72,25 @@ class ResqueScheduler extends EventEmitter
   # fetch the next timestamp in the delay queue
   #
   nextDelayedTimestamp: (time, callback) ->
-    key  = @resque.key('delayed_queue_schedule')
+    key = @resque.key('delayed_queue_schedule')
     @redis.zrangebyscore key, '-inf', time, 'limit', 0, 1, (err, items) ->
       callback items[0]
         
   #
-  # fetch the original jobs and transfer them to their target queues
+  # deliver the delayed jobs to their targeted queues
   #
-  enqueueDelayedItemsForTimestamp: (timestamp, callback) ->
-    @itemsForTimestamp timestamp, (jobs) =>
-      @transfer job for job in jobs
+  deliverJobs: (timestamp, callback) ->
+    @jobsForDelivery timestamp, (jobs) =>
+      @deliver job for job in jobs
       callback()
         
   #
   # fetch all the jobs at the delayed timeslot
   #
-  itemsForTimestamp: (timestamp, callback) ->
+  jobsForDelivery: (timestamp, callback) ->
     key = @resque.key "delayed:#{timestamp}"
     @redis.lrange key, 0, -1, (err, jobs) =>
-      @cleanupTimestamp timestamp, =>
+      @cleanup timestamp, =>
         result = []
         result.push JSON.parse job for job in jobs
         callback result
@@ -101,14 +98,14 @@ class ResqueScheduler extends EventEmitter
   #
   # enqueue the delayed job with resque
   #
-  transfer: (job) ->
-    log "Transfering job. #{job.class}"
+  deliver: (job) ->
+    log "Delivering job #{job.class}"
     @resque.enqueue job.queue, job.class, job.args
   
   #
   # delete the timestamp from the delay queue
   #
-  cleanupTimestamp: (timestamp, callback) ->
+  cleanup: (timestamp, callback) ->
     key = @resque.key("delayed:#{timestamp}")
     multi = @redis.multi()
     multi.del  key
