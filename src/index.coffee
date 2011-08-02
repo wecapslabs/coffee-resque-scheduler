@@ -1,105 +1,125 @@
+{log}        = require 'util'
 EventEmitter = require('events').EventEmitter
 
 Helpers =
-  rTimestamp: (timestamp) ->
-    if typeof(timestamp) == 'object' && typeof(timestamp.getTime()) != 'undefined'
-      rTimestamp = timestamp.getTime() / 1000
-    else if typeof(timestamp) == 'number'
-      rTimestamp = timestamp / 1000
+  timestamp: (val) ->
+    Math.floor @getTime val
+    
+  getTime: (val) ->
+    if @isDate val
+      val.getTime() / 1000
+    else if @isNumber val
+      val / 1000
     else
-      throw "Invalid timestamp provide. Should be either a Date object or a number."
-    Math.floor rTimestamp
-
-# Maintains the actual queue that will be
-# processing the scheduled jobs
+      throw "Invalid timestamp provide. Should be either a Date object or a number."    
+    
+  isDate:   (val) -> '[object Date]' is toString.apply val
+  isNumber: (val) -> typeof val is 'number' and isFinite val
+ 
+#        
+# Maintains the actual queue that will be processing the scheduled jobs.
 # Most of the logic is ported over from the Ruby Resque Scheduler,
 # so I tried to keep the names and rough functionality the same so
 # the can be compatible and such.
-
+#
 class ResqueScheduler extends EventEmitter
-  constructor: (Resque) ->
-    @resque   = Resque
-    @redis    = @resque.redis
-    @running  = false
-    @ready    = false
-    @interval = null
+  constructor: (resque) ->
+    @resque  = resque
+    @redis   = @resque.redis
+    @running = false
     
   enqueueAt: (queue, timestamp, command, args) ->
     item = JSON.stringify class: command, queue: queue, args: args || []
     @delayedPush timestamp, item
 
   enqueueIn: (queue, numberOfSecondsFromNow, command, args) ->
-    newTime = new Date().getTime() + (numberOfSecondsFromNow * 1000)
+    newTime = @now() + numberOfSecondsFromNow * 1000
     @enqueueAt queue, newTime, command, args
 
-  delayedPush: (timestamp, item) ->
-    rTimestamp = Helpers.rTimestamp timestamp
-    multi = @redis.multi()
-    multi.rpush @resque.key("delayed:#{rTimestamp}"), item
-    multi.zadd  @resque.key('delayed_queue_schedule'), rTimestamp, rTimestamp
+  delayedPush: (delay, item) ->
+    future = Helpers.timestamp delay
+    multi  = @redis.multi()
+    multi.rpush @resque.key("delayed:#{future}"), item
+    multi.zadd  @resque.key('delayed_queue_schedule'), future, future
     multi.exec()
     
   start: ->
-    if not @running
-      @running = true
-      @interval = setInterval ( => @poll() ), 1000
+    return if @running
+    @running = true
+    @poll()
   
-  end: (cb) ->
+  end: ->
     @running = false
-    clearInterval @interval
-    @interval = null
-    
-  poll: ->
-    # Calculate the current
-    # Decide if there is/are timestamp(s) in the sorted list to operate on 
-    # if there are, get pull them
-    @nextDelayedTimestamp (err, timestamp) =>
-      if !err && timestamp
-        console.log "Got the timestamp, attempting to get enqueue somethings..."
-        @enqueueDelayedItemsForTimestamp timestamp, (err) =>
-          @nextDelayedTimestamp arguments.callee unless err?
-    return
-    
-  nextDelayedTimestamp: (callback) ->
-    time = Helpers.rTimestamp(new Date())
-    @redis.zrangebyscore @resque.key('delayed_queue_schedule'), '-inf', time, 'limit', 0, 1, (err, items) ->
-      if err || items == null || items.length == 0
-        callback(err)
-      else
-        console.log "Returning the next timestamp that I found"
-        callback(false, items[0])
-        
-  enqueueDelayedItemsForTimestamp: (timestamp, callback) ->
-    @nextItemForTimestamp timestamp, (err, job) =>
-      if !err && job
-        console.log "About to attempt to requeue a job..."
-        @transfer job
-        @nextItemForTimestamp timestamp, arguments.callee
-      else
-        callback(err)
-      
-  
-  nextItemForTimestamp: (timestamp, callback) ->
-    key = @resque.key("delayed:#{timestamp}")
-    @redis.lpop key, (err, job) =>
-      @cleanupTimestamp timestamp
-      if err
-        callback err
-      else
-        console.log "Returning a job that I found in the queue."
-        callback false, JSON.parse job
 
+  #
+  # poll for all timestamps between between now and in the past
+  #    
+  poll: ->
+    time = Helpers.timestamp @now()
+    @nextDelayedTimestamp time, (timestamp) =>
+      if timestamp
+        @enqueueDelayedItemsForTimestamp timestamp, => @poll()
+      else
+        @pause()
+  
+  #
+  # ran out of delayed jobs to transfer
+  #
+  pause: ->
+    setTimeout =>
+      return unless @running
+      @poll()
+    , 1000
+    
+  #
+  # fetch the next timestamp in the delay queue
+  #
+  nextDelayedTimestamp: (time, callback) ->
+    key  = @resque.key('delayed_queue_schedule')
+    @redis.zrangebyscore key, '-inf', time, 'limit', 0, 1, (err, items) ->
+      callback items[0]
+        
+  #
+  # fetch the original jobs and transfer them to their target queues
+  #
+  enqueueDelayedItemsForTimestamp: (timestamp, callback) ->
+    @itemsForTimestamp timestamp, (jobs) =>
+      @transfer job for job in jobs
+      callback()
+        
+  #
+  # fetch all the jobs at the delayed timeslot
+  #
+  itemsForTimestamp: (timestamp, callback) ->
+    key = @resque.key "delayed:#{timestamp}"
+    @redis.lrange key, 0, -1, (err, jobs) =>
+      @cleanupTimestamp timestamp, =>
+        result = []
+        result.push JSON.parse job for job in jobs
+        callback result
+
+  #
+  # enqueue the delayed job with resque
+  #
   transfer: (job) ->
-    console.log "Queuing job: #{JSON.stringify job}"
+    log "Transfering job. #{job.class}"
     @resque.enqueue job.queue, job.class, job.args
   
-  cleanupTimestamp: (timestamp) ->
+  #
+  # delete the timestamp from the delay queue
+  #
+  cleanupTimestamp: (timestamp, callback) ->
     key = @resque.key("delayed:#{timestamp}")
-    @redis.llen key, (err, len) =>
-      if len == 0
-        @redis.del key
-        @redis.zrem @resque.key('delayed_queue_schedule'), timestamp
+    multi = @redis.multi()
+    multi.del  key
+    multi.zrem @resque.key('delayed_queue_schedule'), timestamp
+    multi.exec -> callback()
     
+  #
+  # current time in millis
+  #
+  now: -> new Date().getTime()
+        
 exports.schedulerUsing = (Resque) ->
   new exports.ResqueScheduler Resque || {}
 
