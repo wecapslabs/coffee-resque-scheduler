@@ -1,4 +1,3 @@
-{log}        = require 'util'
 EventEmitter = require('events').EventEmitter
 
 Helpers =
@@ -102,7 +101,6 @@ class ResqueScheduler extends EventEmitter
   # enqueue the delayed job with resque
   #
   deliver: (job) ->
-    log "Delivering job #{job.class}"
     @resque.enqueue job.queue, job.class, job.args
 
   #
